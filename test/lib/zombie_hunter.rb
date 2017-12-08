@@ -6,4 +6,4 @@ module ZombieHunter
   end
 end
 
-Test::Unit::TestCase.include ZombieHunter
+#Test::Unit::TestCase.include ZombieHunter
