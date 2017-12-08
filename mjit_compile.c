@@ -52,6 +52,135 @@ fprint_setlocal(FILE *f, unsigned int pop_pos, lindex_t idx, rb_num_t level)
     }
 }
 
+/* push back stack in local variable to YARV's stack pointer */
+static void
+fprint_args(FILE *f, unsigned int argc, unsigned int base_pos)
+{
+    if (argc) {
+	unsigned int i;
+	/* TODO: use memmove or memcopy, if not optimized by compiler */
+	for (i = 0; i < argc; i++) {
+	    fprintf(f, "    *(cfp->sp) = stack[%d];\n", base_pos + i);
+	    fprintf(f, "    cfp->sp++;\n");
+	}
+    }
+}
+
+extern int simple_iseq_p(const rb_iseq_t *iseq);
+
+static int
+inlinable_cfunc_p(CALL_CACHE cc)
+{
+    return GET_GLOBAL_METHOD_STATE() == cc->method_state && cc->me && cc->me->def->type == VM_METHOD_TYPE_CFUNC;
+}
+
+/* Returns iseq from cc if it's available and still not obsoleted. */
+static const rb_iseq_t *
+get_iseq_if_available(CALL_CACHE cc)
+{
+    if (GET_GLOBAL_METHOD_STATE() == cc->method_state
+	&& cc->me && cc->me->def->type == VM_METHOD_TYPE_ISEQ) {
+	return rb_iseq_check(cc->me->def->body.iseq.iseqptr);
+    }
+    return NULL;
+}
+
+/* TODO: move to somewhere shared with vm_args.c */
+#define IS_ARGS_SPLAT(ci)   ((ci)->flag & VM_CALL_ARGS_SPLAT)
+#define IS_ARGS_KEYWORD(ci) ((ci)->flag & VM_CALL_KWARG)
+
+/* Returns TRUE if iseq is inlinable, otherwise NULL. This becomes TRUE in the same condition
+   as CI_SET_FASTPATH (in vm_callee_setup_arg) is called from vm_call_iseq_setup. */
+static int
+inlinable_iseq_p(CALL_INFO ci, CALL_CACHE cc, const rb_iseq_t *iseq)
+{
+    return iseq != NULL
+	&& simple_iseq_p(iseq) && !(ci->flag & VM_CALL_KW_SPLAT) /* top of vm_callee_setup_arg */
+	&& (!IS_ARGS_SPLAT(ci) && !IS_ARGS_KEYWORD(ci) && !(METHOD_ENTRY_VISI(cc->me) == METHOD_VISI_PROTECTED)); /* CI_SET_FASTPATH */
+}
+
+/* Compiles CALL_METHOD macro to f. `calling` should be already defined in `f`.
+   This method inlines fast path of vm_call_method_each_type for some types assuming
+   that cc passes mjit_check_invalid_cc. */
+static void
+fprint_call_method(FILE *f, VALUE ci_v, VALUE cc_v, unsigned int result_pos)
+{
+    const rb_iseq_t *iseq;
+    CALL_CACHE cc = (CALL_CACHE)cc_v;
+
+    if (inlinable_cfunc_p(cc)) {
+	fprintf(f, "    stack[%d] = mjit_call_cfunc(ec, cfp, &calling, 0x%"PRIxVALUE", 0x%"PRIxVALUE");\n", result_pos, ci_v, (VALUE)cc->me);
+	return;
+    }
+
+    fprintf(f, "    {\n");
+    fprintf(f, "      VALUE v;\n");
+
+    iseq = get_iseq_if_available(cc);
+    /* In the condition that CI_SET_FASTPATH (in vm_callee_setup_arg) is called from vm_call_iseq_setup, this inlines vm_call_iseq_setup_normal */
+    if (inlinable_iseq_p((CALL_INFO)ci_v, cc, iseq)) {
+	/* TODO: check calling->argc for argument_arity_error */
+	int param_size = iseq->body->param.size;
+	fprintf(f, "      VALUE *argv = cfp->sp - calling.argc;\n");
+	fprintf(f, "      cfp->sp = argv - 1;\n"); /* recv */
+	fprintf(f, "      vm_push_frame(ec, 0x%"PRIxVALUE", VM_FRAME_MAGIC_METHOD | VM_ENV_FLAG_LOCAL, calling.recv, "
+		"calling.block_handler, 0x%"PRIxVALUE", 0x%"PRIxVALUE", argv + %d, %d, %d);\n",
+		(VALUE)iseq, (VALUE)cc->me, (VALUE)iseq->body->iseq_encoded, param_size, iseq->body->local_table_size - param_size, iseq->body->stack_max);
+	fprintf(f, "      v = Qundef;\n");
+    } else {
+	fprintf(f, "      v = (*((CALL_CACHE)0x%"PRIxVALUE")->call)(ec, cfp, &calling, 0x%"PRIxVALUE", 0x%"PRIxVALUE");\n", cc_v, ci_v, cc_v);
+    }
+
+    if (iseq && iseq->body->catch_table == NULL) {
+	/* TODO: Probably it's better to discard this code if method is changed */
+	fprintf(f, "      if (v == Qundef && (v = mjit_exec(ec)) == Qundef) {\n");
+    } else {
+	/* When catch table exists, we want to call setjmp and use vm_exec's fallback handler. */
+	fprintf(f, "      if (v == Qundef) {\n");
+    }
+    fprintf(f, "        VM_ENV_FLAGS_SET(ec->cfp->ep, VM_FRAME_FLAG_FINISH);\n"); /* This is vm_call0_body's code after vm_call_iseq_setup */
+    fprintf(f, "        stack[%d] = vm_exec(ec);\n", result_pos);
+    fprintf(f, "      } else {\n");
+    fprintf(f, "        stack[%d] = v;\n", result_pos);
+    fprintf(f, "      }\n");
+    fprintf(f, "    }\n");
+}
+
+/* Compile send and opt_send_without_block instructions to `f`, and return stack size change */
+static int
+compile_send(FILE *f, const VALUE *operands, unsigned int stack_size, int with_block)
+{
+    CALL_INFO ci = (CALL_INFO)operands[0];
+    CALL_CACHE cc = (CALL_CACHE)operands[1];
+    unsigned int argc = ci->orig_argc; /* unlike `ci->orig_argc`, `argc` may include blockarg */
+    if (with_block) {
+	argc += ((ci->flag & VM_CALL_ARGS_BLOCKARG) ? 1 : 0);
+    }
+
+    if (inlinable_cfunc_p(cc) || inlinable_iseq_p(ci, cc, get_iseq_if_available(cc))) {
+	fprintf(f, "  if (UNLIKELY(mjit_check_invalid_cc(stack[%d], %llu, %llu))) {\n", stack_size - 1 - argc, cc->method_state, cc->class_serial);
+    } else {
+	fprintf(f, "  if (UNLIKELY(GET_GLOBAL_METHOD_STATE() != ((CALL_CACHE)0x%"PRIxVALUE")->method_state)) {\n", (VALUE)cc);
+    }
+    fprintf(f, "    cfp->sp = cfp->bp + %d;\n", stack_size + 1);
+    fprintf(f, "    goto cancel;\n");
+    fprintf(f, "  }\n");
+
+    fprintf(f, "  {\n");
+    fprintf(f, "    struct rb_calling_info calling;\n");
+    fprint_args(f, argc + 1, stack_size - argc - 1); /* +1 is for recv */
+    if (with_block) {
+	fprintf(f, "    vm_caller_setup_arg_block(ec, cfp, &calling, 0x%"PRIxVALUE", 0x%"PRIxVALUE", FALSE);\n", operands[0], operands[2]);
+    } else {
+	fprintf(f, "    calling.block_handler = VM_BLOCK_HANDLER_NONE;\n");
+    }
+    fprintf(f, "    calling.argc = %d;\n", ci->orig_argc);
+    fprintf(f, "    calling.recv = stack[%d];\n", stack_size - 1 - argc);
+    fprint_call_method(f, operands[0], operands[1], stack_size - argc - 1);
+    fprintf(f, "  }\n");
+    return -argc;
+}
+
 static void
 fprint_opt_call_variables(FILE *f, unsigned int stack_size, unsigned int argc)
 {
@@ -379,53 +508,53 @@ compile_insn(FILE *f, const struct rb_iseq_constant_body *body, const int insn, 
       //  	b->stack_size - (unsigned int)operands[0], operands[0], b->stack_size - (unsigned int)operands[0]);
       //  b->stack_size += 1 - (unsigned int)operands[0];
       //  break;
-      //case YARVINSN_opt_send_without_block:
-      //  b->stack_size += compile_send(f, operands, b->stack_size, FALSE);
-      //  break;
-      //case YARVINSN_invokesuper:
-      //  {
-      //      CALL_INFO ci = (CALL_INFO)operands[0];
-      //      unsigned int push_count = ci->orig_argc + ((ci->flag & VM_CALL_ARGS_BLOCKARG) ? 1 : 0);
+      case YARVINSN_opt_send_without_block:
+        b->stack_size += compile_send(f, operands, b->stack_size, FALSE);
+        break;
+      case YARVINSN_invokesuper:
+        {
+            CALL_INFO ci = (CALL_INFO)operands[0];
+            unsigned int push_count = ci->orig_argc + ((ci->flag & VM_CALL_ARGS_BLOCKARG) ? 1 : 0);
 
-      //      fprintf(f, "  {\n");
-      //      fprintf(f, "    struct rb_calling_info calling;\n");
-      //      fprintf(f, "    calling.argc = %d;\n", ci->orig_argc);
-      //      fprint_args(f, push_count + 1, b->stack_size - push_count - 1);
-      //      fprintf(f, "    vm_caller_setup_arg_block(ec, cfp, &calling, 0x%"PRIxVALUE", 0x%"PRIxVALUE", TRUE);\n", operands[0], operands[2]);
-      //      fprintf(f, "    calling.recv = cfp->self;\n");
-      //      fprintf(f, "    vm_search_super_method(ec, cfp, &calling, 0x%"PRIxVALUE", 0x%"PRIxVALUE");\n", operands[0], operands[1]);
-      //      fprintf(f, "    {\n");
-      //      fprintf(f, "      VALUE v = (*((CALL_CACHE)0x%"PRIxVALUE")->call)(ec, cfp, &calling, 0x%"PRIxVALUE", 0x%"PRIxVALUE");\n", operands[1], operands[0], operands[1]);
-      //      fprintf(f, "      if (v == Qundef && (v = mjit_exec(ec)) == Qundef) {\n"); /* TODO: we need some check to call `mjit_exec` directly (skipping setjmp), but not done yet */
-      //      fprintf(f, "        VM_ENV_FLAGS_SET(ec->cfp->ep, VM_FRAME_FLAG_FINISH);\n"); /* This is vm_call0_body's code after vm_call_iseq_setup */
-      //      fprintf(f, "        stack[%d] = vm_exec(ec);\n", b->stack_size - push_count - 1);
-      //      fprintf(f, "      } else {\n");
-      //      fprintf(f, "        stack[%d] = v;\n", b->stack_size - push_count - 1);
-      //      fprintf(f, "      }\n");
-      //      fprintf(f, "    }\n");
-      //      fprintf(f, "  }\n");
-      //      b->stack_size -= push_count;
-      //  }
-      //  break;
-      //case YARVINSN_invokeblock:
-      //  {
-      //      CALL_INFO ci = (CALL_INFO)operands[0];
-      //      fprintf(f, "  {\n");
-      //      fprintf(f, "    struct rb_calling_info calling;\n");
-      //      fprintf(f, "    calling.argc = %d;\n", ci->orig_argc);
-      //      fprintf(f, "    calling.block_handler = VM_BLOCK_HANDLER_NONE;\n");
-      //      fprintf(f, "    calling.recv = cfp->self;\n");
+            fprintf(f, "  {\n");
+            fprintf(f, "    struct rb_calling_info calling;\n");
+            fprintf(f, "    calling.argc = %d;\n", ci->orig_argc);
+            fprint_args(f, push_count + 1, b->stack_size - push_count - 1);
+            fprintf(f, "    vm_caller_setup_arg_block(ec, cfp, &calling, 0x%"PRIxVALUE", 0x%"PRIxVALUE", TRUE);\n", operands[0], operands[2]);
+            fprintf(f, "    calling.recv = cfp->self;\n");
+            fprintf(f, "    vm_search_super_method(ec, cfp, &calling, 0x%"PRIxVALUE", 0x%"PRIxVALUE");\n", operands[0], operands[1]);
+            fprintf(f, "    {\n");
+            fprintf(f, "      VALUE v = (*((CALL_CACHE)0x%"PRIxVALUE")->call)(ec, cfp, &calling, 0x%"PRIxVALUE", 0x%"PRIxVALUE");\n", operands[1], operands[0], operands[1]);
+            fprintf(f, "      if (v == Qundef && (v = mjit_exec(ec)) == Qundef) {\n"); /* TODO: we need some check to call `mjit_exec` directly (skipping setjmp), but not done yet */
+            fprintf(f, "        VM_ENV_FLAGS_SET(ec->cfp->ep, VM_FRAME_FLAG_FINISH);\n"); /* This is vm_call0_body's code after vm_call_iseq_setup */
+            fprintf(f, "        stack[%d] = vm_exec(ec);\n", b->stack_size - push_count - 1);
+            fprintf(f, "      } else {\n");
+            fprintf(f, "        stack[%d] = v;\n", b->stack_size - push_count - 1);
+            fprintf(f, "      }\n");
+            fprintf(f, "    }\n");
+            fprintf(f, "  }\n");
+            b->stack_size -= push_count;
+        }
+        break;
+      case YARVINSN_invokeblock:
+        {
+            CALL_INFO ci = (CALL_INFO)operands[0];
+            fprintf(f, "  {\n");
+            fprintf(f, "    struct rb_calling_info calling;\n");
+            fprintf(f, "    calling.argc = %d;\n", ci->orig_argc);
+            fprintf(f, "    calling.block_handler = VM_BLOCK_HANDLER_NONE;\n");
+            fprintf(f, "    calling.recv = cfp->self;\n");
 
-      //      fprint_args(f, ci->orig_argc, b->stack_size - ci->orig_argc);
-      //      fprintf(f, "    stack[%d] = vm_invoke_block(ec, cfp, &calling, 0x%"PRIxVALUE");\n", b->stack_size - ci->orig_argc, operands[0]);
-      //      fprintf(f, "    if (stack[%d] == Qundef) {\n", b->stack_size - ci->orig_argc);
-      //      fprintf(f, "      VM_ENV_FLAGS_SET(ec->cfp->ep, VM_FRAME_FLAG_FINISH);\n");
-      //      fprintf(f, "      stack[%d] = vm_exec(ec);\n", b->stack_size - ci->orig_argc);
-      //      fprintf(f, "    }\n");
-      //      fprintf(f, "  }\n");
-      //      b->stack_size += 1 - ci->orig_argc;
-      //  }
-      //  break;
+            fprint_args(f, ci->orig_argc, b->stack_size - ci->orig_argc);
+            fprintf(f, "    stack[%d] = vm_invoke_block(ec, cfp, &calling, 0x%"PRIxVALUE");\n", b->stack_size - ci->orig_argc, operands[0]);
+            fprintf(f, "    if (stack[%d] == Qundef) {\n", b->stack_size - ci->orig_argc);
+            fprintf(f, "      VM_ENV_FLAGS_SET(ec->cfp->ep, VM_FRAME_FLAG_FINISH);\n");
+            fprintf(f, "      stack[%d] = vm_exec(ec);\n", b->stack_size - ci->orig_argc);
+            fprintf(f, "    }\n");
+            fprintf(f, "  }\n");
+            b->stack_size += 1 - ci->orig_argc;
+        }
+        break;
       case YARVINSN_leave:
 	/* NOTE: We don't use YARV's stack on JIT. So vm_stack_consistency_error isn't run
 	   during execution and we check stack_size here instead. */

@@ -3389,6 +3389,8 @@ vm_collect_usage_register(int reg, int isset)
 }
 #endif
 
+#else /* #ifndef MJIT_HEADER */
+#include "mjit_helper.h"
 #endif /* #ifndef MJIT_HEADER */
 
 #include "vm_call_iseq_optimized.inc" /* required from vm_insnhelper.c */
