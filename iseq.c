@@ -22,6 +22,7 @@
 #include "vm_core.h"
 #include "iseq.h"
 #include "id_table.h"
+#include "mjit.h"
 
 #include "insns.inc"
 #include "insns_info.inc"
@@ -72,6 +73,7 @@ rb_iseq_free(const rb_iseq_t *iseq)
     RUBY_FREE_ENTER("iseq");
 
     if (iseq) {
+	mjit_free_iseq(iseq); /* Inform MJIT */
 	if (iseq->body) {
 	    ruby_xfree((void *)iseq->body->iseq_encoded);
 	    ruby_xfree((void *)iseq->body->insns_info);

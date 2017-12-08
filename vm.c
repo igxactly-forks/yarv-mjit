@@ -295,6 +295,7 @@ static VALUE vm_make_env_object(const rb_execution_context_t *ec, rb_control_fra
 extern VALUE vm_invoke_bmethod(rb_execution_context_t *ec, rb_proc_t *proc, VALUE self, int argc, const VALUE *argv, VALUE block_handler);
 static VALUE vm_invoke_proc(rb_execution_context_t *ec, rb_proc_t *proc, VALUE self, int argc, const VALUE *argv, VALUE block_handler);
 
+#include "mjit.h"
 #include "vm_insnhelper.h"
 #include "vm_exec.h"
 #include "vm_insnhelper.c"
@@ -1781,7 +1782,8 @@ vm_exec(rb_execution_context_t *ec)
     _tag.retval = Qnil;
     if ((state = EC_EXEC_TAG()) == TAG_NONE) {
       vm_loop_start:
-	result = vm_exec_core(ec, initial);
+	if ((result = mjit_execute_iseq(ec)) == Qundef)
+	    result = vm_exec_core(ec, initial);
 	VM_ASSERT(ec->tag == &_tag);
 	if ((state = _tag.state) != TAG_NONE) {
 	    err = (struct vm_throw_data *)result;

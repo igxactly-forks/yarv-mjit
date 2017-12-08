@@ -282,6 +282,9 @@ pathobj_realpath(VALUE pathobj)
     }
 }
 
+/* A forward declaration  */
+struct rb_mjit_unit_iseq;
+
 struct rb_iseq_constant_body {
     enum iseq_type {
 	ISEQ_TYPE_TOP,
@@ -398,6 +401,15 @@ struct rb_iseq_constant_body {
     unsigned int ci_kw_size;
     unsigned int insns_info_size;
     unsigned int stack_max; /* for stack overflow check */
+
+    /* The following MJIT related info.  */
+    void *jit_code;
+    /* Number of iseq calls since the last unload of a JITted code and
+       number of all calls before the last unload of the code.  Their
+       sum is the overall number of iseq calls.  */
+    long unsigned resume_calls, stop_calls;
+
+    struct rb_mjit_unit_iseq *unit_iseq;
 };
 
 /* T_IMEMO/iseq */
@@ -655,7 +667,7 @@ typedef struct rb_control_frame_struct {
     VALUE *sp;			/* cfp[1] */
     const rb_iseq_t *iseq;	/* cfp[2] */
     VALUE self;			/* cfp[3] / block[0] */
-    const VALUE *ep;		/* cfp[4] / block[1] */
+    VALUE *ep;			/* cfp[4] / block[1] */
     const void *block_code;     /* cfp[5] / block[2] */ /* iseq or ifunc */
 
 #if VM_DEBUG_BP_CHECK
