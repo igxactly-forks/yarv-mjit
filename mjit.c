@@ -1,6 +1,6 @@
 /**********************************************************************
 
-  mjit.c - MRI method JIT compiler
+  mjit.c - MRI method JIT compiler infrastructure
 
   Copyright (C) 2017 Vladimir Makarov <vmakarov@redhat.com>.
 
@@ -230,9 +230,11 @@ struct rb_mjit_unit_iseq {
 /* Used C compiler path.  */
 static char *cc_path;
 /* Name of the header file.  */
-static char *header_fname;
+static const char *header_fname;
 /* Name of the precompiled header file.  */
-static char *pch_fname;
+static const char *pch_fname;
+/* Windows-supported /tmp */
+static const char *tmp_dirname;
 
 /* Return length of NULL-terminated array ARGS excluding the NULL
    marker.  */
@@ -296,11 +298,7 @@ static char *
 get_uniq_fname(unsigned long id, const char *prefix, const char *suffix)
 {
     char str[70];
-    const char *tmp = getenv("TMP"); /* For MinGW */
-    if (tmp == NULL)
-	tmp = "/tmp";
-
-    sprintf(str, "%s/%sp%luu%lu%s", tmp, prefix, (unsigned long) getpid(), id, suffix);
+    sprintf(str, "%s/%sp%luu%lu%s", tmp_dirname, prefix, (unsigned long) getpid(), id, suffix);
     return get_string(str);
 }
 
@@ -443,7 +441,7 @@ get_from_list(struct rb_mjit_unit_list *list)
     struct rb_mjit_unit *u;
     struct rb_mjit_unit *best_u = NULL;
     struct rb_mjit_unit_iseq *ui;
-    unsigned long calls_num, best_calls_num;
+    unsigned long calls_num, best_calls_num = 0;
 
 #if MJIT_CHECK_LISTS
     check_list(list);
@@ -464,33 +462,25 @@ get_from_list(struct rb_mjit_unit_list *list)
     return best_u;
 }
 
-/* Print ARGS according to FORMAT to stderr.  */
-static void
-va_list_log(const char *format, va_list args)
-{
-    char str[256];
-
-    vsprintf(str, format, args);
-    /* Use one call for non-interrupted output:  */
-    fprintf(stderr, "+++%s: time - %.3f ms\n", str, relative_ms_time());
-}
-
 /* Print the arguments according to FORMAT to stderr only if MJIT
    verbose option value is more or equal to LEVEL.  */
-static void
+PRINTF_ARGS(static void, 2, 3)
 verbose(int level, const char *format, ...)
 {
     va_list args;
 
     va_start(args, format);
-    if (mjit_opts.verbose >= level)
-	va_list_log(format, args);
+    if (mjit_opts.verbose >= level) {
+	char str[256];
+	vsprintf(str, format, args);
+	fprintf(stderr, "+++%s: time - %.3f ms\n", str, relative_ms_time());
+    }
     va_end(args);
 }
 
 /* Print the arguments according to FORMAT to stderr only if the
    message LEVEL is not greater to the current debug level.  */
-static void
+PRINTF_ARGS(static void, 2, 3)
 debug(int level, const char *format, ...)
 {
     va_list args;
@@ -498,8 +488,11 @@ debug(int level, const char *format, ...)
     if (! mjit_opts.debug || ! mjit_opts.verbose)
 	return;
     va_start(args, format);
-    if (debug_level >= level)
-	va_list_log(format, args);
+    if (debug_level >= level) {
+	char str[256];
+	vsprintf(str, format, args);
+	fprintf(stderr, "+++%s: time - %.3f ms\n", str, relative_ms_time());
+    }
     va_end(args);
 }
 
@@ -529,7 +522,6 @@ CRITICAL_SECTION_FINISH(int level, const char *msg)
    header.  */
 static const char *GCC_COMMON_ARGS_DEBUG[] = {"gcc", "-O0", "-g", "-Wfatal-errors", "-fPIC", "-shared", "-w", "-pipe", "-nostartfiles", "-nodefaultlibs", "-nostdlib", NULL};
 static const char *GCC_COMMON_ARGS[] = {"gcc", "-O2", "-Wfatal-errors", "-fPIC", "-shared", "-w", "-pipe", "-nostartfiles", "-nodefaultlibs", "-nostdlib", NULL};
-static const char *GCC_USE_PCH_ARGS[] = {"-I/tmp", NULL};
 
 #ifdef __MACH__
 
@@ -549,29 +541,18 @@ static const char *LLVM_USE_PCH_ARGS[] = {"-include-pch", NULL, "-Wl,-undefined"
 
 /* Translate iseq of unit U into C code and output it to the
    corresponding file.  Add include directives with INCLUDE_FNAME
-   unless it is NULL.  Return 0 for a success.  Otherwise return IO
-   error code.  */
+   unless it is NULL.  Return 0 for a success. Otherwise non-0 value */
 static int
 translate_unit_iseq(struct rb_mjit_unit *u, const char *include_fname)
 {
-    int fd, err;
+    int fd, err, success_p;
     FILE *f = fopen(u->cfname, "w");
+    char mjit_fname_holder[MAX_MJIT_FNAME_LEN];
 
     if (f == NULL)
 	return errno;
-    if (include_fname != NULL) {
-	const char *s;
-
-	fprintf(f, "#include \"");
-	for (s = pch_fname; strcmp(s, ".gch") != 0; s++) {
-	    if (*s == '\\') {
-		fprintf(f, "\\%c", *s);
-	    } else {
-		fprintf(f, "%c", *s);
-	    }
-	}
-	fprintf(f, "\"\n");
-    }
+    if (include_fname != NULL)
+	fprintf(f, "#include \"%s\"\n", include_fname);
 
 #ifdef _WIN32
     /* Requirements for DLL */
@@ -579,14 +560,13 @@ translate_unit_iseq(struct rb_mjit_unit *u, const char *include_fname)
     fprintf(f, "int __stdcall DllMainCRTStartup(void* hinstDLL, unsigned int fdwReason, void* lpvReserved) { return 1; }\n");
 #endif
 
-    /* TODO: compile function here */
+    success_p = mjit_compile(f, u->unit_iseq->iseq->body, get_unit_iseq_fname(u->unit_iseq, mjit_fname_holder));
 
     fd = fileno(f);
     fsync(fd);
     err = ferror(f);
     fclose(f);
-    if (TRUE) return 1; /* Force failure until compiler is added. TODO: remove this */
-    return err;
+    return err || !success_p;
 }
 
 /* Start an OS process of executable PATH with arguments ARGV.  Return
@@ -684,8 +664,8 @@ start_unit(struct rb_mjit_unit *u)
 	    args = form_args(5, (mjit_opts.debug ? LLVM_COMMON_ARGS_DEBUG : LLVM_COMMON_ARGS),
 			     LLVM_USE_PCH_ARGS, input, output, libs);
 	} else {
-	    args = form_args(5, (mjit_opts.debug ? GCC_COMMON_ARGS_DEBUG : GCC_COMMON_ARGS),
-			     GCC_USE_PCH_ARGS, input, output, libs);
+	    args = form_args(4, (mjit_opts.debug ? GCC_COMMON_ARGS_DEBUG : GCC_COMMON_ARGS),
+			     input, output, libs);
 	}
 	if (args == NULL)
 	    pid = -1;
@@ -740,7 +720,7 @@ load_unit(struct rb_mjit_unit *u)
 	u->ofname = NULL;
     }
     if (handle != NULL)
-	verbose(2, "Success in loading code of unit %d", u->num);
+	verbose(1, "Success in loading code of unit %d", u->num);
     else if (mjit_opts.warnings || mjit_opts.verbose)
 	fprintf(stderr, "MJIT warning: failure in loading code of unit %d(%s)\n", u->num, dlerror());
     ui = u->unit_iseq;
@@ -757,14 +737,14 @@ load_unit(struct rb_mjit_unit *u)
 	} else {
 	    fname = get_unit_iseq_fname(ui, mjit_fname_holder);
 	    addr = dlsym(handle, fname);
-	    if ((err_name = dlerror ()) != NULL) {
+	    if ((err_name = dlerror()) != NULL) {
 		debug(0, "Failure (%s) in setting address of iseq %d(%s)", err_name, ui->num, fname);
-		addr = (void *) NOT_ADDED_JIT_ISEQ_FUN;
+		addr = (void *)NOT_ADDED_JIT_ISEQ_FUN;
 		add_to_list(u, &obsolete_units);
 		u->status = UNIT_FAILED;
 	    } else {
 		debug(2, "Success in setting address of iseq %d(%s)(%s) 0x%"PRIxVALUE,
-		      ui->num, fname, ui->label, addr);
+		      ui->num, fname, ui->label, (VALUE)addr);
 		add_to_list(u, &active_units);
 		u->status = UNIT_LOADED;
 	    }
@@ -807,11 +787,12 @@ worker(void)
 	    u->status = UNIT_IN_GENERATION;
 	CRITICAL_SECTION_FINISH(3, "in worker to start the unit");
 	if (u != NULL) {
-	    start_unit(u);
-	    waitpid(u->pid, &stat, 0);
 	    exit_code = -1;
-	    if (WIFEXITED(stat)) {
-		exit_code = WEXITSTATUS(stat);
+	    if (start_unit(u)) {
+		waitpid(u->pid, &stat, 0);
+		if (WIFEXITED(stat)) {
+		    exit_code = WEXITSTATUS(stat);
+		}
 	    }
 	    CRITICAL_SECTION_START(3, "in worker to setup status");
 	    u->status = exit_code != 0 ? UNIT_FAILED : UNIT_SUCCESS;
@@ -820,7 +801,7 @@ worker(void)
 	    else if (mjit_opts.warnings || mjit_opts.verbose)
 		fprintf(stderr, "MJIT warning: failure in compilation of unit %d\n", u->num);
 	    CRITICAL_SECTION_FINISH(3, "in worker to setup status");
-	    if (! mjit_opts.save_temps) {
+	    if (!mjit_opts.save_temps) {
 		remove(u->cfname);
 		free(u->cfname); u->cfname = NULL;
 	    }
@@ -896,7 +877,7 @@ create_unit_iseq(rb_iseq_t *iseq)
     unit_iseq_list = ui;
     ui->iseq_size = iseq->body->iseq_size;
     ui->label = NULL;
-    if (mjit_opts.debug) {
+    if (mjit_opts.verbose >= 2 || mjit_opts.debug) {
 	ui->label = get_string(RSTRING_PTR(iseq->body->location.label));
 	ui->resume_calls = ui->stop_calls = 0;
     }
@@ -1375,8 +1356,8 @@ child_after_fork(void)
 void
 mjit_init(struct mjit_options *opts)
 {
-    const char *path;
     FILE *f;
+    const char *path;
 
     stop_mjit_generation_p = FALSE;
     in_gc = FALSE;
@@ -1392,26 +1373,26 @@ mjit_init(struct mjit_options *opts)
     debug(2, "Start initializing MJIT");
     finish_worker_p = FALSE;
     worker_finished_p = FALSE;
-    header_fname = xmalloc(strlen(BUILD_DIR) + 2 + strlen(RUBY_MJIT_HEADER_FNAME));
-    if (header_fname == NULL)
-	return;
-    strcpy(header_fname, BUILD_DIR);
-    strcat(header_fname, "/");
-    strcat(header_fname, RUBY_MJIT_HEADER_FNAME);
-    if ((f = fopen(header_fname, "r")) == NULL) {
-	free(header_fname);
-	header_fname = xmalloc(strlen(DEST_INCDIR) + 2 + strlen(RUBY_MJIT_HEADER_FNAME));
-	if (header_fname == NULL)
-	    return;
-	strcpy(header_fname, DEST_INCDIR);
-	strcat(header_fname, "/");
-	strcat(header_fname, RUBY_MJIT_HEADER_FNAME);
-	if ((f = fopen(header_fname, "r")) == NULL) {
-	    free(header_fname); header_fname = NULL;
+
+    pch_fname = mjit_opts.debug ? MJIT_HEADER_BUILD_PATH "-debug.h.gch" : MJIT_HEADER_BUILD_PATH ".h.gch";
+    if (f = fopen(pch_fname, "r")) {
+	header_fname = mjit_opts.debug ? MJIT_HEADER_BUILD_PATH "-debug.h" : MJIT_HEADER_BUILD_PATH ".h";
+    } else {
+	pch_fname = mjit_opts.debug ? MJIT_HEADER_INSTALL_PATH "-debug.h.gch" : MJIT_HEADER_INSTALL_PATH ".h.gch";
+	if (f = fopen(pch_fname, "r")) {
+	    header_fname = mjit_opts.debug ? MJIT_HEADER_INSTALL_PATH "-debug.h" : MJIT_HEADER_INSTALL_PATH ".h";
+	} else {
+	    header_fname = NULL;
+	    verbose(1, "Failed to find header file in '%s' or '%s'.", MJIT_HEADER_BUILD_PATH ".h.gch", MJIT_HEADER_INSTALL_PATH ".h.gch");
 	    return;
 	}
     }
     fclose(f);
+
+    tmp_dirname = getenv("TMP"); /* For MinGW */
+    if (tmp_dirname == NULL)
+	tmp_dirname = "/tmp";
+
 #ifdef __MACH__
     if (!mjit_opts.llvm) {
 	if (mjit_opts.warnings || mjit_opts.verbose)
@@ -1422,15 +1403,9 @@ mjit_init(struct mjit_options *opts)
     path = mjit_opts.llvm ? LLVM_PATH : GCC_PATH;
     cc_path = xmalloc(strlen(path) + 1);
     if (cc_path == NULL) {
-	free(header_fname); header_fname = NULL;
 	return;
     }
     strcpy(cc_path, path);
-    if ((pch_fname = get_uniq_fname(0, "_mjit_h", ".h.gch")) == NULL) {
-	free(header_fname); header_fname = NULL;
-	free(cc_path); cc_path = NULL;
-	return;
-    }
     init_conts();
     init_workers();
 
@@ -1479,11 +1454,7 @@ mjit_finish(void)
     native_cond_destroy(&mjit_client_wakeup);
     native_cond_destroy(&mjit_worker_wakeup);
     native_cond_destroy(&mjit_gc_wakeup);
-    if (! mjit_opts.save_temps)
-	remove(pch_fname);
-    free(header_fname); header_fname = NULL;
     free(cc_path); cc_path = NULL;
-    free(pch_fname); pch_fname = NULL;
     finish_workers();
     finish_conts();
     mjit_init_p = FALSE;

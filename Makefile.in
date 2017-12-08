@@ -69,7 +69,7 @@ debugflags = @debugflags@
 warnflags = @warnflags@ @strict_warnflags@
 cppflags = @cppflags@
 XCFLAGS = @XCFLAGS@
-CPPFLAGS = @CPPFLAGS@ $(INCFLAGS) -DBUILD_DIR=\""$(PWD)"\" -DDEST_INCDIR=\""$(prefix)/include/$(RUBY_BASE_NAME)-$(ruby_version)/$(arch)"\" -DLIBRUBY_LIBDIR=\""$(prefix)/lib"\" -DLIBRUBYARG_SHARED=\""$(LIBRUBYARG_SHARED)"\"
+CPPFLAGS = @CPPFLAGS@ $(INCFLAGS) -DBUILD_DIR=\""$(PWD)"\" -DDEST_INCDIR=\""$(prefix)/include/$(RUBY_BASE_NAME)-$(ruby_version)/$(arch)"\" -DLIBRUBY_LIBDIR=\""$(prefix)/lib"\" -DLIBRUBYARG_SHARED=\""$(LIBRUBYARG_SHARED)"\" -DMJIT_HEADER_BUILD_PATH=\""$(PWD)/$(MJIT_MIN_HEADER)"\" -DMJIT_HEADER_INSTALL_PATH=\""$(prefix)/include/ruby-$(RUBY_PROGRAM_VERSION)/$(arch)/rb_mjit_min_header-$(RUBY_PROGRAM_VERSION)"\"
 LDFLAGS = @STATIC@ $(CFLAGS) @LDFLAGS@
 EXTLDFLAGS = @EXTLDFLAGS@
 XLDFLAGS = @XLDFLAGS@ $(EXTLDFLAGS)

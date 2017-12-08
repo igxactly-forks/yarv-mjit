@@ -58,6 +58,7 @@ RUBY_SYMBOL_EXPORT_END
 
 typedef VALUE (*mjit_fun_t)(rb_execution_context_t *, rb_control_frame_t *);
 
+extern int mjit_compile(FILE *f, const struct rb_iseq_constant_body *body, const char *funcname);
 extern void mjit_init(struct mjit_options *opts);
 extern void mjit_free_iseq(const rb_iseq_t *iseq);
 extern void mjit_gc_start(void);

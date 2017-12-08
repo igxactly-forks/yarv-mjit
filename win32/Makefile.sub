@@ -276,7 +276,7 @@ LDSHARED_0 = @if exist $(@).manifest $(MINIRUBY) -run -e wait_writable -- -n 10 
 LDSHARED_1 = @if exist $(@).manifest $(MANIFESTTOOL) -manifest $(@).manifest -outputresource:$(@);2
 LDSHARED_2 = @if exist $(@).manifest @$(RM) $(@:/=\).manifest
 !endif
-CPPFLAGS = $(DEFS) $(ARCHDEFS) $(CPPFLAGS) -DBUILD_DIR=\""$(PWD)"\" -DDEST_INCDIR=\""$(prefix)/include/$(RUBY_BASE_NAME)-$(ruby_version)/$(arch)"\" -DLIBRUBY_LIBDIR=\""$(prefix)/lib"\" -DLIBRUBYARG_SHARED=\""$(LIBRUBYARG_SHARED)"\"
+CPPFLAGS = $(DEFS) $(ARCHDEFS) $(CPPFLAGS) -DBUILD_DIR=\""$(PWD)"\" -DDEST_INCDIR=\""$(prefix)/include/$(RUBY_BASE_NAME)-$(ruby_version)/$(arch)"\" -DLIBRUBY_LIBDIR=\""$(prefix)/lib"\" -DLIBRUBYARG_SHARED=\""$(LIBRUBYARG_SHARED)"\" -DMJIT_HEADER_BUILD_PATH=\""$(PWD)/$(MJIT_MIN_HEADER)"\" -DMJIT_HEADER_INSTALL_PATH=\""$(prefix)/include/ruby-$(RUBY_PROGRAM_VERSION)/$(arch)/rb_mjit_min_header-$(RUBY_PROGRAM_VERSION)"\"
 
 DLDFLAGS = $(LDFLAGS) -dll
 SOLIBS =
