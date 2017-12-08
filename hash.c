@@ -486,7 +486,7 @@ rb_hash_tbl(VALUE hash)
     return hash_tbl(hash);
 }
 
-struct st_table *
+RUBY_FUNC_EXPORTED struct st_table *
 rb_hash_tbl_raw(VALUE hash)
 {
     return hash_tbl(hash);
@@ -2930,7 +2930,7 @@ rb_hash_compare_by_id(VALUE hash)
  *
  */
 
-VALUE
+RUBY_FUNC_EXPORTED VALUE
 rb_hash_compare_by_id_p(VALUE hash)
 {
     if (!RHASH(hash)->ntbl)
