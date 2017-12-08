@@ -434,7 +434,7 @@ rb_hash_new_compare_by_id(void)
     return hash;
 }
 
-VALUE
+RUBY_FUNC_EXPORTED VALUE
 rb_hash_new_with_size(st_index_t size)
 {
     VALUE ret = rb_hash_new();
@@ -2136,7 +2136,7 @@ keys_i(VALUE key, VALUE value, VALUE ary)
  *
  */
 
-VALUE
+RUBY_FUNC_EXPORTED VALUE
 rb_hash_keys(VALUE hash)
 {
     VALUE keys;

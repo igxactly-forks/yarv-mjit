@@ -370,7 +370,7 @@ rb_setup_fake_str(struct RString *fake_str, const char *name, long len, rb_encod
     return setup_fake_str(fake_str, name, len, rb_enc_to_index(enc));
 }
 
-VALUE
+RUBY_FUNC_EXPORTED VALUE
 rb_fstring_new(const char *ptr, long len)
 {
     struct RString fake_str;
@@ -10204,7 +10204,7 @@ sym_to_sym(VALUE sym)
     return sym;
 }
 
-VALUE
+RUBY_FUNC_EXPORTED VALUE
 rb_sym_proc_call(ID mid, int argc, const VALUE *argv, VALUE passed_proc)
 {
     VALUE obj;

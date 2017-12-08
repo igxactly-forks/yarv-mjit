@@ -1172,7 +1172,7 @@ vm_invoke_bmethod(rb_execution_context_t *ec, rb_proc_t *proc, VALUE self,
     return invoke_block_from_c_proc(ec, proc, self, argc, argv, block_handler, TRUE);
 }
 
-VALUE
+RUBY_FUNC_EXPORTED VALUE
 rb_vm_invoke_proc(rb_execution_context_t *ec, rb_proc_t *proc,
 		  int argc, const VALUE *argv, VALUE passed_block_handler)
 {
